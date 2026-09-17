@@ -1,4 +1,4 @@
-"""
+﻿"""
 engineering_agent
 ==================
 
@@ -35,6 +35,12 @@ from .models import (
     TaskProfileName,
 )
 
+from .execution_state import (
+    ExecutionStateError,
+    InvalidTaskTransitionError,
+    StateTransition,
+    TaskExecutionStateMachine,
+)
 from .task_graph import (
     DependencyCycleError,
     DuplicateTaskError,
@@ -57,7 +63,11 @@ __all__ = [
     "RiskLevel",
     "HealthState",
     "TaskProfileName",
-    "EngineeringTask",
+    "TaskExecutionStateMachine",
+"StateTransition",
+"ExecutionStateError",
+"InvalidTaskTransitionError",
+"EngineeringTask",
     "TaskEvidence",
     "TaskGraph",
     "TaskStatus",
@@ -68,3 +78,4 @@ __all__ = [
 ]
 
 __version__ = "0.1.0"
+
