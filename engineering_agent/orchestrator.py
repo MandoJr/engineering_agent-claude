@@ -488,6 +488,47 @@ class EngineeringOrchestrator:
                                     f"{failed_task_id}:"
                                 )
                             ]
+
+                            # A successful recovery may unlock dependent
+                            # tasks. Resume the same DAG instead of ending
+                            # the engineering run prematurely.
+                            resumed = execution.resume(
+                                run.run_id,
+                                plan,
+                                graph,
+                                state_machine,
+                            )
+
+                            if resumed.implementation.edits:
+                                if run.implementation is None:
+                                    run.implementation = resumed.implementation
+                                else:
+                                    run.implementation.edits.extend(
+                                        resumed.implementation.edits
+                                    )
+                                    run.implementation.patch_results.extend(
+                                        resumed.implementation.patch_results
+                                    )
+                                    run.implementation.rollback_performed = (
+                                        run.implementation.rollback_performed
+                                        or resumed.implementation.rollback_performed
+                                    )
+                                    run.implementation.error = (
+                                        resumed.implementation.error
+                                        or run.implementation.error
+                                    )
+
+                            run.tests.extend(resumed.tests)
+                            run.failures.extend(resumed.failures)
+
+                            self._trace(
+                                run,
+                                "task_execution_resumed_after_recovery",
+                                recovered_task=failed_task_id,
+                                completed_tasks=resumed.completed_tasks,
+                                failed_tasks=resumed.failed_tasks,
+                                blocked_tasks=resumed.blocked_tasks,
+                            )
                         else:
                             state_machine.transition(
                                 failed_task_id,

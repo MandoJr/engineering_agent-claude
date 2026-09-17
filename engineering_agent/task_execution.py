@@ -13,6 +13,7 @@ from .models import (
 )
 from .structured_implementer import StructuredCodingImplementer
 from .task_graph import EngineeringTask, TaskGraph, TaskStatus
+from .task_verification import TaskVerificationEngine
 from .tester import TestEngineer
 
 
@@ -29,6 +30,7 @@ class TaskExecutionOutcome:
     failed_tasks: List[str] = field(default_factory=list)
     blocked_tasks: List[str] = field(default_factory=list)
     failures: List[str] = field(default_factory=list)
+    blocked_by: Dict[str, List[str]] = field(default_factory=dict)
 
 
 class TaskExecutionEngine:
@@ -47,6 +49,7 @@ class TaskExecutionEngine:
     ):
         self.implementer = implementer
         self.tester = tester
+        self.verifier = TaskVerificationEngine(tester)
         self.checkpoint = checkpoint
 
     def execute(
@@ -126,30 +129,21 @@ class TaskExecutionEngine:
                 )
                 self._checkpoint(task.task_id, TaskStatus.VERIFYING)
 
-                task_result = self.tester.run_tests(
-                    task.verification_commands
-                )
+                verification = self.verifier.verify(task)
+                task_result = verification.results
                 task_tests[task.task_id] = task_result
                 tests.extend(task_result)
 
-                passed = bool(task_result) and all(
-                    result.passed for result in task_result
-                )
+                passed = verification.passed
 
                 task.add_evidence(
                     "VERIFICATION",
                     (
-                        f"{sum(result.passed for result in task_result)}/"
-                        f"{len(task_result)} verification command(s) passed"
+                        f"{verification.evidence['passed_count']}/"
+                        f"{verification.evidence.get('passed_count', 0) + verification.evidence.get('failed_count', 0)} "
+                        "verification command(s) passed"
                     ),
-                    {
-                        "commands": [
-                            result.command for result in task_result
-                        ],
-                        "passed": all(
-                            result.passed for result in task_result
-                        ) if task_result else False,
-                    },
+                    verification.evidence,
                 )
 
                 if passed:
@@ -190,6 +184,10 @@ class TaskExecutionEngine:
             task.task_id
             for task in graph.blocked_tasks()
         ]
+        blocked_by = {
+            task.task_id: graph.dependency_failures(task.task_id)
+            for task in graph.blocked_tasks()
+        }
 
         overall_success = (
             bool(graph.tasks)
@@ -220,7 +218,29 @@ class TaskExecutionEngine:
             completed_tasks=completed_tasks,
             failed_tasks=list(dict.fromkeys(failed_tasks)),
             blocked_tasks=blocked_tasks,
+            blocked_by=blocked_by,
             failures=failures,
+        )
+
+    def resume(
+        self,
+        run_id: str,
+        plan: EngineeringPlan,
+        graph: TaskGraph,
+        state_machine: TaskExecutionStateMachine,
+    ) -> TaskExecutionOutcome:
+        """
+        Continue execution from the graph's current state.
+
+        Completed terminal tasks are never re-executed. Only tasks that are
+        currently READY can run, which makes this safe to call after a
+        successful recovery transition.
+        """
+        return self.execute(
+            run_id=run_id,
+            plan=plan,
+            graph=graph,
+            state_machine=state_machine,
         )
 
     def _task_plan(
