@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ..backend import CallableBackend, SimpleRouter
-from ..orchestrator import ApprovalError, EngineeringOrchestrator
+from engineering_agent.backend import CallableBackend, SimpleRouter
+from engineering_agent.orchestrator import ApprovalError, EngineeringOrchestrator
 
 
 PLAN_JSON = json.dumps({
@@ -118,7 +118,7 @@ class EngineeringLoopSmokeTest(unittest.TestCase):
             self.agent.implement(proposal.proposal_id)
 
     def test_tools_refuse_paths_outside_project_root(self):
-        from ..tools import ToolBox, Permission, PathNotAllowed
+        from engineering_agent.tools import ToolBox, Permission, PathNotAllowed
         tools = ToolBox(self.agent.config, permission=Permission.READ_ONLY)
         result = tools.read_file("../../etc/passwd")
         self.assertFalse(result.ok)
@@ -126,3 +126,6 @@ class EngineeringLoopSmokeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+

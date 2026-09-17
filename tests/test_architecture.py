@@ -4,17 +4,20 @@ import unittest
 import json
 from pathlib import Path
 
-from ..config import AgentConfig
-from ..models import EngineeringPlan, FileEdit, PlannedChange, TestResult
-from ..models import ChangeOperation, ChangeSet, StructuredChange, PatchResult
-from ..patching import PatchApplier, PatchValidationError, parse_change_set
-from ..repository_graph import RepositoryGraph
-from ..reviewer import CodeReviewer
-from ..tools import Permission, ToolBox
-from ..backend import CallableBackend, SimpleRouter
-from ..orchestrator import EngineeringOrchestrator
-from ..structured_recovery import StructuredFailureRecoveryEngineer
-from ..tester import TestEngineer
+from engineering_agent.config import AgentConfig
+from engineering_agent.models import EngineeringPlan, FileEdit, PlannedChange, TestResult
+from engineering_agent.models import ChangeOperation, ChangeSet, StructuredChange, PatchResult
+from engineering_agent.patching import PatchApplier, PatchValidationError, parse_change_set
+from engineering_agent.repository_graph import RepositoryGraph
+from engineering_agent.reviewer import CodeReviewer
+from engineering_agent.tools import Permission, ToolBox
+from engineering_agent.backend import CallableBackend, SimpleRouter
+from engineering_agent.orchestrator import EngineeringOrchestrator
+from engineering_agent.structured_recovery import StructuredFailureRecoveryEngineer
+from engineering_agent.tester import TestEngineer
+
+TestResult.__test__ = False
+TestEngineer.__test__ = False
 
 class ArchitectureTests(unittest.TestCase):
     def setUp(self):
@@ -116,7 +119,7 @@ class ArchitectureTests(unittest.TestCase):
         class FailingTools(ToolBox):
             def edit_file(inner, relative_path, new_content):
                 if relative_path == "pkg/second.py":
-                    from ..tools import ToolResult
+                    from engineering_agent.tools import ToolResult
                     return ToolResult(False, error="simulated write failure")
                 return super(FailingTools, inner).edit_file(relative_path, new_content)
         tools = FailingTools(self.config, Permission.IMPLEMENT)
@@ -152,3 +155,7 @@ class ArchitectureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
