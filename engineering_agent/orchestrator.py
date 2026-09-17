@@ -41,6 +41,10 @@ from .repository import RepositoryAnalyst
 from .reviewer import CodeReviewer
 from .storage import EngineeringStorage
 from .tester import TestEngineer
+from .task_decomposer import TaskDecomposer
+from .task_execution import TaskExecutionEngine
+from .task_graph import TaskGraph, TaskStatus
+from .execution_state import TaskExecutionStateMachine
 from .tools import Permission, ToolBox
 
 
@@ -137,6 +141,18 @@ class EngineeringOrchestrator:
             raise
 
         run.plan = plan
+
+        task_graph = TaskDecomposer.from_plan(plan)
+        run.task_graph = task_graph.to_dict()
+        run.state_transitions = []
+        run.current_task_id = None
+
+        self._trace(
+            run,
+            "task_graph_created",
+            tasks=len(task_graph.tasks),
+            ready_tasks=len(task_graph.ready_tasks()),
+        )
         self._trace(run, "plan_created", changes=len(plan.changes), risk=plan.risk_level)
         run.status = RunStatus.PLANNED.value
 
@@ -212,6 +228,12 @@ class EngineeringOrchestrator:
         proposal.decided_at = None
         proposal.decision_notes = "Plan revised from execution evidence; fresh approval required."
         run.plan = revised
+
+        task_graph = TaskDecomposer.from_plan(revised)
+        run.task_graph = task_graph.to_dict()
+        run.state_transitions = []
+        run.current_task_id = None
+
         run.approval = proposal.status
         self._trace(run, "plan_revised", revision=revised.revision, evidence_count=len(evidence))
         run.touch()
@@ -234,7 +256,10 @@ class EngineeringOrchestrator:
 
     def implement(self, proposal_id: str) -> EngineeringRun:
         proposal = self.review(proposal_id)
-        if proposal.status not in (ApprovalStatus.APPROVED.value, ApprovalStatus.NOT_REQUIRED.value):
+        if proposal.status not in (
+            ApprovalStatus.APPROVED.value,
+            ApprovalStatus.NOT_REQUIRED.value,
+        ):
             raise ApprovalError(
                 f"Refusing to implement proposal {proposal_id}: status is "
                 f"'{proposal.status}', not APPROVED."
@@ -242,100 +267,358 @@ class EngineeringOrchestrator:
 
         run = self._find_run_for_proposal(proposal_id)
         if run is None:
-            raise KeyError(f"No engineering run found for proposal {proposal_id}")
+            raise KeyError(
+                f"No engineering run found for proposal {proposal_id}"
+            )
 
         profile = TASK_PROFILES[run.task_profile]
         plan = proposal.plan
 
-        # Baseline benchmarks, captured before any change (BASELINE step).
+        if plan is None:
+            raise ValueError(
+                f"Proposal {proposal_id} has no plan to implement"
+            )
+
+        # Baseline measurements happen before any task is changed.
         baseline = self.evaluator.capture_baseline(plan.benchmarks)
-        health_before = self.evaluator.snapshot_health(plan.affected_systems)
+        health_before = self.evaluator.snapshot_health(
+            plan.affected_systems
+        )
 
-        write_tools = ToolBox(self.config, permission=Permission.IMPLEMENT)
+        write_tools = ToolBox(
+            self.config,
+            permission=Permission.IMPLEMENT,
+        )
         backend = self._select_backend(run.task_profile)
-        implementer = StructuredCodingImplementer(backend, write_tools)
 
+        implementer = StructuredCodingImplementer(
+            backend,
+            write_tools,
+        )
+        read_tools = ToolBox(
+            self.config,
+            permission=Permission.READ_ONLY,
+        )
+        tester = TestEngineer(read_tools)
+
+        if run.task_graph:
+            graph = TaskGraph.from_dict(run.task_graph)
+        else:
+            graph = TaskDecomposer.from_plan(plan)
+
+        if run.state_transitions:
+            state_machine = TaskExecutionStateMachine.from_dict(
+                graph,
+                {"transitions": run.state_transitions},
+            )
+        else:
+            state_machine = TaskExecutionStateMachine(graph)
+
+        graph.validate()
+        state_machine.validate()
+
+        run.task_graph = graph.to_dict()
+        run.state_transitions = [
+            transition.to_dict()
+            for transition in state_machine.transitions
+        ]
+        run.current_task_id = None
         run.status = RunStatus.IMPLEMENTING.value
-        self._trace(run, "implementation_started", backend=backend.name)
+        self._trace(
+            run,
+            "task_execution_started",
+            tasks=len(graph.tasks),
+            backend=backend.name,
+        )
         run.touch()
         self.storage.save_run(run)
 
-        impl_result = implementer.implement(run.run_id, plan)
-        run.implementation = impl_result
-        self._trace(run, "implementation_finished", success=impl_result.success, edits=len(impl_result.edits))
+        def checkpoint(task_id: str, task_status: TaskStatus) -> None:
+            run.task_graph = graph.to_dict()
+            run.state_transitions = [
+                transition.to_dict()
+                for transition in state_machine.transitions
+            ]
+            run.current_task_id = task_id
 
-        if not impl_result.success:
-            run.status = RunStatus.FAILED.value
-            run.final_result = impl_result.error
-            run.failures.append(impl_result.error or "implementation failed")
+            if task_status == TaskStatus.RUNNING:
+                run.status = RunStatus.IMPLEMENTING.value
+            elif task_status == TaskStatus.VERIFYING:
+                run.status = RunStatus.TESTING.value
+
+            self._trace(
+                run,
+                "task_state_changed",
+                task_id=task_id,
+                task_status=task_status.value,
+            )
             run.touch()
             self.storage.save_run(run)
-            self.router.report_outcome(backend.name, run.task_profile, success=False)
-            return run
 
-        scope_violations = self.reviewer.check_implementation_scope(plan, impl_result.edits)
-        run.failures.extend(scope_violations)
+        execution = TaskExecutionEngine(
+            implementer,
+            tester,
+            checkpoint=checkpoint,
+        )
 
-        # TEST
-        run.status = RunStatus.TESTING.value
-        read_tools = ToolBox(self.config, permission=Permission.READ_ONLY)
-        tester = TestEngineer(read_tools)
-        test_results = tester.run_tests(plan.tests)
-        run.tests = test_results
-        self._trace(run, "verification_finished", passed=sum(t.passed for t in test_results), total=len(test_results))
+        outcome = execution.execute(
+            run.run_id,
+            plan,
+            graph,
+            state_machine,
+        )
 
-        # FAILURE RECOVERY IF NEEDED (bounded)
-        if profile.requires_tests and not all(t.passed for t in test_results):
-            run.status = RunStatus.RECOVERING.value
-            self.storage.save_run(run)
-            recovery_engineer = StructuredFailureRecoveryEngineer(
-                backend, write_tools, tester, max_attempts=self.config.max_recovery_attempts
+        run.implementation = outcome.implementation
+        run.tests = outcome.tests
+        run.failures.extend(outcome.failures)
+
+        run.task_graph = graph.to_dict()
+        run.state_transitions = [
+            transition.to_dict()
+            for transition in state_machine.transitions
+        ]
+        run.current_task_id = None
+
+        self._trace(
+            run,
+            "task_execution_finished",
+            completed_tasks=outcome.completed_tasks,
+            failed_tasks=outcome.failed_tasks,
+            blocked_tasks=outcome.blocked_tasks,
+        )
+
+        # Bounded recovery remains available. Recovery is directed at the
+        # first failed task so independent tasks that already passed remain
+        # intact; dependent tasks stay blocked until that task succeeds.
+        if profile.requires_tests and outcome.failed_tasks:
+            failed_task_id = outcome.failed_tasks[0]
+            failed_task = graph.get(failed_task_id)
+            failed_task_tests = outcome.task_tests.get(
+                failed_task_id,
+                [],
             )
-            failing_test = next(t for t in test_results if not t.passed)
-            failing_file = impl_result.edits[-1].file if impl_result.edits else (plan.files[0] if plan.files else "")
-            if failing_file:
-                attempts = recovery_engineer.recover(plan, failing_file, failing_test)
-                run.recovery_attempts = attempts
-                if attempts and attempts[-1].succeeded:
-                    run.tests = tester.run_tests(plan.tests)
-                else:
-                    run.failures.append(
-                        f"Recovery exhausted after {len(attempts)} attempt(s); "
-                        f"last test result: {failing_test.command} failed."
+
+            if failed_task_tests:
+                failing_test = next(
+                    (
+                        result
+                        for result in failed_task_tests
+                        if not result.passed
+                    ),
+                    None,
+                )
+
+                if failing_test is not None:
+                    failed_plan = outcome.task_plans[failed_task_id]
+
+                    run.status = RunStatus.RECOVERING.value
+                    state_machine.transition(
+                        failed_task_id,
+                        TaskStatus.RECOVERING,
+                        reason="Beginning bounded recovery for failed task.",
+                    )
+                    run.task_graph = graph.to_dict()
+                    run.state_transitions = [
+                        transition.to_dict()
+                        for transition in state_machine.transitions
+                    ]
+                    run.current_task_id = failed_task_id
+                    self._trace(
+                        run,
+                        "task_recovery_started",
+                        task_id=failed_task_id,
+                    )
+                    run.touch()
+                    self.storage.save_run(run)
+
+                    recovery_engineer = StructuredFailureRecoveryEngineer(
+                        backend,
+                        write_tools,
+                        tester,
+                        max_attempts=self.config.max_recovery_attempts,
                     )
 
-        # INDEPENDENT REVIEW: evaluated from actual edits/tests, not the
-        # implementer's own success assertion.
+                    failing_file = (
+                        failed_task.affected_files[0]
+                        if failed_task.affected_files
+                        else (
+                            failed_plan.files[0]
+                            if failed_plan.files
+                            else ""
+                        )
+                    )
+
+                    attempts = recovery_engineer.recover(
+                        failed_plan,
+                        failing_file,
+                        failing_test,
+                    )
+                    run.recovery_attempts.extend(attempts)
+
+                    if attempts and attempts[-1].succeeded:
+                        state_machine.transition(
+                            failed_task_id,
+                            TaskStatus.VERIFYING,
+                            reason="Recovery patch applied; re-verifying task.",
+                        )
+
+                        recovered_tests = tester.run_tests(
+                            failed_task.verification_commands
+                        )
+                        outcome.task_tests[failed_task_id] = recovered_tests
+                        run.tests = [
+                            result
+                            for task_results in outcome.task_tests.values()
+                            for result in task_results
+                        ]
+
+                        if recovered_tests and all(
+                            result.passed
+                            for result in recovered_tests
+                        ):
+                            state_machine.transition(
+                                failed_task_id,
+                                TaskStatus.PASSED,
+                                reason="Recovery verification passed.",
+                            )
+                            run.failures = [
+                                failure
+                                for failure in run.failures
+                                if not failure.startswith(
+                                    f"{failed_task_id}:"
+                                )
+                            ]
+                        else:
+                            state_machine.transition(
+                                failed_task_id,
+                                TaskStatus.FAILED,
+                                reason="Recovery verification still fails.",
+                            )
+                    else:
+                        state_machine.transition(
+                            failed_task_id,
+                            TaskStatus.FAILED,
+                            reason="Recovery attempts exhausted.",
+                        )
+
+                    run.task_graph = graph.to_dict()
+                    run.state_transitions = [
+                        transition.to_dict()
+                        for transition in state_machine.transitions
+                    ]
+                    run.current_task_id = None
+                    self._trace(
+                        run,
+                        "task_recovery_finished",
+                        task_id=failed_task_id,
+                        attempts=len(attempts),
+                        succeeded=bool(
+                            attempts and attempts[-1].succeeded
+                        ),
+                    )
+                    run.touch()
+                    self.storage.save_run(run)
+
+        # Remaining independent tasks may still have completed, while tasks
+        # that depend on a failed task remain BLOCKED.
         actual_diff = read_tools.git_diff()
         run.review = self.reviewer.review_implementation(
-            plan, impl_result.edits, run.tests, impl_result.patch_results,
+            plan,
+            run.implementation.edits if run.implementation else [],
+            run.tests,
+            run.implementation.patch_results
+            if run.implementation
+            else [],
             actual_diff.data if actual_diff.ok else "",
         )
+
         if run.review.findings:
             run.failures.extend(run.review.findings)
-        self._trace(run, "independent_review_finished", passed=run.review.passed, findings=len(run.review.findings))
 
-        # EVALUATE
+        self._trace(
+            run,
+            "independent_review_finished",
+            passed=run.review.passed,
+            findings=len(run.review.findings),
+        )
+
         run.status = RunStatus.EVALUATING.value
-        health_after = self.evaluator.snapshot_health(plan.affected_systems)
-        benchmarks = self.evaluator.run_benchmarks(plan.benchmarks, baseline)
+
+        health_after = self.evaluator.snapshot_health(
+            plan.affected_systems
+        )
+        benchmarks = self.evaluator.run_benchmarks(
+            plan.benchmarks,
+            baseline,
+        )
+
         evaluation = self.evaluator.evaluate(
-            run.run_id, plan, run.tests, health_before, health_after, benchmarks
+            run.run_id,
+            plan,
+            run.tests,
+            health_before,
+            health_after,
+            benchmarks,
         )
         run.evaluation = evaluation
 
-        overall_success = evaluation.code_works and run.review.passed
-        run.status = RunStatus.COMPLETE.value if overall_success else RunStatus.FAILED.value
+        graph_complete = all(
+            task.status == TaskStatus.PASSED
+            for task in graph.tasks.values()
+        ) if graph.tasks else False
+
+        overall_success = (
+            graph_complete
+            and evaluation.code_works
+            and run.review.passed
+        )
+
+        run.status = (
+            RunStatus.COMPLETE.value
+            if overall_success
+            else RunStatus.FAILED.value
+        )
         run.final_result = evaluation.summary
-        run.touch()
 
-        # LEARN
+        run.task_graph = graph.to_dict()
+        run.state_transitions = [
+            transition.to_dict()
+            for transition in state_machine.transitions
+        ]
+        run.current_task_id = None
+
         lessons = self.learning.create_lessons_from_run(run)
-        run.lessons_created = [l.lesson_id for l in lessons]
+        run.lessons_created = [
+            lesson.lesson_id
+            for lesson in lessons
+        ]
 
+        run.touch()
         self.storage.save_run(run)
-        self.router.report_outcome(backend.name, run.task_profile, success=overall_success,
-                                    evidence={"evaluation": evaluation.to_dict()})
+
+        self.router.report_outcome(
+            backend.name,
+            run.task_profile,
+            success=overall_success,
+            evidence={
+                "evaluation": evaluation.to_dict(),
+                "completed_tasks": [
+                    task_id
+                    for task_id in graph.tasks
+                    if graph.get(task_id).status == TaskStatus.PASSED
+                ],
+                "failed_tasks": [
+                    task_id
+                    for task_id in graph.tasks
+                    if graph.get(task_id).status == TaskStatus.FAILED
+                ],
+                "blocked_tasks": [
+                    task_id
+                    for task_id in graph.tasks
+                    if graph.get(task_id).status == TaskStatus.BLOCKED
+                ],
+            },
+        )
         return run
 
     @staticmethod

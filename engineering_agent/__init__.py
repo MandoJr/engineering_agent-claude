@@ -41,6 +41,14 @@ from .execution_state import (
     StateTransition,
     TaskExecutionStateMachine,
 )
+from .task_decomposer import (
+    TaskDecomposer,
+    TaskDecompositionError,
+)
+from .task_execution import (
+    TaskExecutionEngine,
+    TaskExecutionOutcome,
+)
 from .task_graph import (
     DependencyCycleError,
     DuplicateTaskError,
@@ -67,6 +75,10 @@ __all__ = [
 "StateTransition",
 "ExecutionStateError",
 "InvalidTaskTransitionError",
+"TaskDecomposer",
+"TaskDecompositionError",
+"TaskExecutionEngine",
+"TaskExecutionOutcome",
 "EngineeringTask",
     "TaskEvidence",
     "TaskGraph",
@@ -78,4 +90,3 @@ __all__ = [
 ]
 
 __version__ = "0.1.0"
-

@@ -358,6 +358,9 @@ class EngineeringRun(_Base):
     evaluation: Optional[EvaluationResult] = None
     review: Optional[ReviewResult] = None
     trace: List[Dict[str, Any]] = field(default_factory=list)
+    task_graph: Optional[Dict[str, Any]] = None
+    state_transitions: List[Dict[str, Any]] = field(default_factory=list)
+    current_task_id: Optional[str] = None
     status: str = RunStatus.CREATED.value
     final_result: Optional[str] = None
     lessons_created: List[str] = field(default_factory=list)   # lesson_ids
