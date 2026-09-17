@@ -35,6 +35,17 @@ from .models import (
     TaskProfileName,
 )
 
+from .task_graph import (
+    DependencyCycleError,
+    DuplicateTaskError,
+    EngineeringTask,
+    TaskEvidence,
+    TaskGraph,
+    TaskGraphError,
+    TaskStatus,
+    UnknownTaskError,
+)
+
 __all__ = [
     "EngineeringOrchestrator",
     "EngineeringGoal",
@@ -46,6 +57,14 @@ __all__ = [
     "RiskLevel",
     "HealthState",
     "TaskProfileName",
+    "EngineeringTask",
+    "TaskEvidence",
+    "TaskGraph",
+    "TaskStatus",
+    "TaskGraphError",
+    "DuplicateTaskError",
+    "UnknownTaskError",
+    "DependencyCycleError",
 ]
 
 __version__ = "0.1.0"
