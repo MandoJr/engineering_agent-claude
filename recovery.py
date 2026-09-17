@@ -48,6 +48,11 @@ class FailureRecoveryEngineer:
         attempts: List[RecoveryAttempt] = []
 
         for attempt_number in range(1, self.max_attempts + 1):
+            if failing_file not in set(plan.files):
+                attempts.append(RecoveryAttempt(attempt_number=attempt_number,
+                    root_cause="Recovery target is outside approved plan scope.",
+                    recovery_plan="Stopped; additional approval is required.", succeeded=False))
+                break
             root_cause, new_content = self._analyze_and_fix(
                 failing_file, failed_test, attempts
             )
@@ -59,6 +64,13 @@ class FailureRecoveryEngineer:
                     recovery_plan="No confident fix available; stopping recovery.",
                     succeeded=False,
                 ))
+                break
+
+            current = self.tools.read_file(failing_file)
+            if current.ok and current.data["content"] == new_content:
+                attempts.append(RecoveryAttempt(attempt_number=attempt_number,
+                    root_cause=root_cause, recovery_plan="Generated an identical patch; stopping to avoid a repeated attempt.",
+                    succeeded=False, evidence=[failed_test.classification]))
                 break
 
             write_result = self.tools.edit_file(failing_file, new_content)
@@ -87,6 +99,7 @@ class FailureRecoveryEngineer:
                 edits=[edit],
                 test_result=new_result,
                 succeeded=succeeded,
+                evidence=[new_result.classification] if new_result else [],
             ))
 
             if succeeded:

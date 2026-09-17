@@ -17,6 +17,7 @@ from typing import List
 from .backend import ModelBackend
 from .models import RepositoryContext
 from .tools import ToolBox
+from .repository_graph import RepositoryGraph
 
 TEST_DIR_HINTS = ("test", "tests", "spec", "specs")
 CONFIG_FILE_HINTS = (".yaml", ".yml", ".json", ".toml", ".ini", ".cfg", ".env.example")
@@ -45,6 +46,7 @@ class RepositoryAnalyst:
         self.backend = backend
 
     def analyze(self, goal_description: str, max_candidate_files: int = 20) -> RepositoryContext:
+        graph = RepositoryGraph(self.tools.root).build()
         affected_systems = self._guess_systems(goal_description)
 
         candidate_files: List[str] = []
@@ -74,6 +76,26 @@ class RepositoryAnalyst:
         status = self.tools.git_status()
         git_summary = status.data if status.ok else (status.error or "unavailable")
 
+        # AST-derived context supplements the goal keywords.  It is kept
+        # separate from the planner's candidate heuristic so malformed code
+        # remains visible rather than silently disappearing from analysis.
+        for path, info in graph.modules.items():
+            if any(word in path.lower() for word in goal_description.lower().split() if len(word) > 3):
+                if path not in candidate_files:
+                    candidate_files.append(path)
+        candidate_files = graph.impacted_by(candidate_files[:max_candidate_files])[:max_candidate_files]
+        symbols = {path: [symbol.name for symbol in graph.modules[path].symbols]
+                   for path in candidate_files if path in graph.modules}
+        entry_points = [path for path in graph.modules
+                        if path.endswith(("__main__.py", "main.py", "cli.py", "manage.py"))]
+        structural_risks = []
+        for path in candidate_files:
+            info = graph.modules.get(path)
+            if info and graph.importers_of(info.module):
+                structural_risks.append(f"{path} is imported by {', '.join(graph.importers_of(info.module))}")
+            if info and info.parse_error:
+                structural_risks.append(f"{path} cannot be parsed: {info.parse_error}")
+
         return RepositoryContext(
             root=str(self.tools.root),
             affected_systems=affected_systems,
@@ -82,6 +104,9 @@ class RepositoryAnalyst:
             related_config=related_config,
             symbols=symbols,
             git_status_summary=git_summary,
+            module_graph=graph.summary(candidate_files),
+            entry_points=entry_points[:20],
+            risks=structural_risks,
         )
 
     # -- heuristics -----------------------------------------------------------

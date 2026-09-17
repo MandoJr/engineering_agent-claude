@@ -25,7 +25,7 @@ Respond with ONLY a JSON object (no prose, no markdown fences) with exactly thes
 {
   "affected_systems": [string],
   "files": [string],              // relative paths, prefer files from candidate_files when possible
-  "changes": [{"file": string, "description": string, "change_type": "MODIFY"|"CREATE"|"DELETE"}],
+  "changes": [{"file": string, "description": string, "change_type": "MODIFY"|"CREATE"|"DELETE", "objective": string, "prerequisites": [string], "verification": [string], "completion_criteria": [string], "risk": "LOW"|"MEDIUM"|"HIGH"}],
   "risks": [string],
   "tests": [string],              // test file paths or commands that should validate this change
   "benchmarks": [string],         // named signals worth comparing before/after (may be empty)
@@ -69,6 +69,9 @@ Candidate files: {repo_context.candidate_files}
 Related tests found: {repo_context.related_tests}
 Related config found: {repo_context.related_config}
 Known top-level symbols per file: {json.dumps(repo_context.symbols)[:4000]}
+Structural dependency map: {json.dumps(repo_context.module_graph)[:6000]}
+Repository-analysis risks: {repo_context.risks}
+Entry points: {repo_context.entry_points}
 Git status: {repo_context.git_status_summary[:1000]}
 
 RELEVANT PAST LESSONS
@@ -90,6 +93,11 @@ Produce the engineering plan JSON now."""
                     file=c.get("file", ""),
                     description=c.get("description", ""),
                     change_type=c.get("change_type", "MODIFY"),
+                    objective=c.get("objective", c.get("description", "")),
+                    prerequisites=list(c.get("prerequisites", [])),
+                    verification=list(c.get("verification", [])),
+                    completion_criteria=list(c.get("completion_criteria", [])),
+                    risk=c.get("risk", RiskLevel.LOW.value),
                 )
                 for c in parsed.get("changes", [])
             ]
@@ -102,16 +110,32 @@ Produce the engineering plan JSON now."""
                 affected_systems=parsed.get("affected_systems", repo_context.affected_systems),
                 files=parsed.get("files", []),
                 changes=changes,
-                risks=parsed.get("risks", []),
+                risks=list(repo_context.risks) + parsed.get("risks", []),
                 tests=parsed.get("tests", repo_context.related_tests),
                 benchmarks=parsed.get("benchmarks", []),
                 expected_result=parsed.get("expected_result", ""),
                 risk_level=risk_level,
                 raw_backend_output=raw,
+                assumptions=parsed.get("assumptions", []),
+                verification_requirements=parsed.get("verification_requirements", []),
             )
         except (TypeError, AttributeError) as exc:
             return self._fallback_plan(goal, repo_context, raw,
                                         reason=f"backend response had unexpected shape: {exc}")
+
+    def revise(self, goal: EngineeringGoal, repo_context: RepositoryContext,
+               prior_plan: EngineeringPlan, evidence: List[str],
+               relevant_lessons: Optional[List[EngineeringLesson]] = None) -> EngineeringPlan:
+        """Re-plan with observed evidence instead of retrying a stale plan."""
+        revision_goal = EngineeringGoal(
+            goal_id=goal.goal_id, task_profile=goal.task_profile,
+            description=(f"{goal.description}\n\nPLAN REVISION REQUIRED. "
+                         f"Previous plan: {prior_plan.to_dict()}\n"
+                         f"Observed evidence: {evidence}"),
+        )
+        revised = self.plan(revision_goal, repo_context, relevant_lessons)
+        revised.revision = prior_plan.revision + 1
+        return revised
 
     def _fallback_plan(self, goal: EngineeringGoal, repo_context: RepositoryContext,
                         raw: str, reason: str) -> EngineeringPlan:

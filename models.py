@@ -117,6 +117,9 @@ class RepositoryContext(_Base):
     related_config: List[str] = field(default_factory=list)
     symbols: Dict[str, List[str]] = field(default_factory=dict)   # file -> symbol names
     git_status_summary: str = ""
+    module_graph: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    entry_points: List[str] = field(default_factory=list)
+    risks: List[str] = field(default_factory=list)
     notes: Optional[str] = None
 
 
@@ -129,6 +132,11 @@ class PlannedChange(_Base):
     file: str = ""
     description: str = ""
     change_type: str = "MODIFY"   # MODIFY | CREATE | DELETE
+    objective: str = ""
+    prerequisites: List[str] = field(default_factory=list)
+    verification: List[str] = field(default_factory=list)
+    completion_criteria: List[str] = field(default_factory=list)
+    risk: str = RiskLevel.LOW.value
 
 
 @dataclass
@@ -145,6 +153,9 @@ class EngineeringPlan(_Base):
     risk_level: str = RiskLevel.LOW.value
     created_at: float = field(default_factory=_now)
     raw_backend_output: Optional[str] = None
+    revision: int = 0
+    assumptions: List[str] = field(default_factory=list)
+    verification_requirements: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +182,53 @@ class EngineeringProposal(_Base):
 # Diffs / implementation
 # ---------------------------------------------------------------------------
 
+class ChangeOperation(str, Enum):
+    CREATE_FILE = "CREATE_FILE"
+    REPLACE_TEXT = "REPLACE_TEXT"
+    INSERT_BEFORE = "INSERT_BEFORE"
+    INSERT_AFTER = "INSERT_AFTER"
+    REPLACE_SYMBOL = "REPLACE_SYMBOL"
+    DELETE_REGION = "DELETE_REGION"
+    DELETE_FILE = "DELETE_FILE"
+    MOVE_FILE = "MOVE_FILE"
+
+
+@dataclass
+class StructuredChange(_Base):
+    """A small, verifiable intent; never an implicit whole-file overwrite."""
+    change_id: str = field(default_factory=lambda: _new_id("chg"))
+    file: str = ""
+    operation: str = ChangeOperation.REPLACE_TEXT.value
+    target_symbol: Optional[str] = None
+    expected_content: Optional[str] = None
+    content: str = ""
+    target_file: Optional[str] = None
+    reason: str = ""
+    task_id: Optional[str] = None
+    risk: str = RiskLevel.LOW.value
+    validation_requirements: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ChangeSet(_Base):
+    changes: List[StructuredChange] = field(default_factory=list)
+    task_id: Optional[str] = None
+    rationale: str = ""
+
+
+@dataclass
+class PatchResult(_Base):
+    change_id: str = ""
+    file: str = ""
+    operation: str = ""
+    applied: bool = False
+    classification: str = ""
+    message: str = ""
+    diff: str = ""
+    lines_added: int = 0
+    lines_removed: int = 0
+    rollback_performed: bool = False
+
 @dataclass
 class FileEdit(_Base):
     file: str = ""
@@ -187,6 +245,8 @@ class ImplementationResult(_Base):
     backend_used: Optional[str] = None
     success: bool = False
     error: Optional[str] = None
+    patch_results: List[PatchResult] = field(default_factory=list)
+    rollback_performed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +261,7 @@ class TestResult(_Base):
     stdout_tail: str = ""
     stderr_tail: str = ""
     duration_s: float = 0.0
+    classification: str = ""
 
 
 @dataclass
@@ -211,6 +272,7 @@ class RecoveryAttempt(_Base):
     edits: List[FileEdit] = field(default_factory=list)
     test_result: Optional[TestResult] = None
     succeeded: bool = False
+    evidence: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +308,12 @@ class EvaluationResult(_Base):
     health_after: List[HealthSnapshot] = field(default_factory=list)
     summary: str = ""
     created_at: float = field(default_factory=_now)
+
+@dataclass
+class ReviewResult(_Base):
+    passed: bool = False
+    findings: List[str] = field(default_factory=list)
+    evidence: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +356,8 @@ class EngineeringRun(_Base):
     failures: List[str] = field(default_factory=list)
     recovery_attempts: List[RecoveryAttempt] = field(default_factory=list)
     evaluation: Optional[EvaluationResult] = None
+    review: Optional[ReviewResult] = None
+    trace: List[Dict[str, Any]] = field(default_factory=list)
     status: str = RunStatus.CREATED.value
     final_result: Optional[str] = None
     lessons_created: List[str] = field(default_factory=list)   # lesson_ids

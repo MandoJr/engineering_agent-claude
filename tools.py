@@ -56,6 +56,26 @@ def _looks_like_secret(path: Path) -> bool:
     return any(marker in name for marker in SECRET_FILENAME_MARKERS)
 
 
+def _has_unquoted_shell_operator(command: str) -> bool:
+    """Reject shell composition while permitting e.g. ``python -c 'a; b'``."""
+    quote = None
+    escaped = False
+    index = 0
+    operators = ("&&", "||", ";", ">", "<", "`", "$(")
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif char in ("'", '"'):
+            quote = None if quote == char else (char if quote is None else quote)
+        elif quote is None and any(command.startswith(operator, index) for operator in operators):
+            return True
+        index += 1
+    return False
+
+
 class ToolBox:
     """
     All tool calls are scoped to `config.project_root` and checked against
@@ -86,9 +106,10 @@ class ToolBox:
         except ValueError:
             raise PathNotAllowed(f"'{relative_path}' escapes project root")
 
-        rel_str = str(candidate.relative_to(self.root))
+        relative = candidate.relative_to(self.root)
+        rel_str = relative.as_posix()
         for forbidden in self.config.forbidden_paths:
-            if rel_str == forbidden or rel_str.startswith(forbidden + "/"):
+            if forbidden in relative.parts or rel_str == forbidden or rel_str.startswith(forbidden.rstrip("/") + "/"):
                 raise PathNotAllowed(f"'{relative_path}' is under forbidden path '{forbidden}'")
 
         if _looks_like_secret(candidate):
@@ -268,6 +289,26 @@ class ToolBox:
         except ToolError as exc:
             return ToolResult(False, error=str(exc))
 
+    def delete_file(self, relative_path: str) -> ToolResult:
+        """Delete one approved file only when destructive operations are enabled.
+
+        The operation is intentionally opt-in at configuration time; a model
+        cannot enable it through a plan or a prompt.
+        """
+        self._require(Permission.IMPLEMENT)
+        if not getattr(self.config, "allow_file_deletion", False):
+            return ToolResult(False, error="File deletion is disabled by configuration")
+        try:
+            path = self._resolve(relative_path)
+            if not path.is_file():
+                return ToolResult(False, error=f"Not a file: {relative_path}")
+            old = path.read_text(encoding="utf-8", errors="replace")
+            path.unlink()
+            diff = "".join(difflib.unified_diff(old.splitlines(keepends=True), [], fromfile=relative_path, tofile="/dev/null"))
+            return ToolResult(True, data={"diff": diff, "bytes_before": len(old.encode("utf-8")), "bytes_after": 0})
+        except ToolError as exc:
+            return ToolResult(False, error=str(exc))
+
     # -- test / command tools (READ_ONLY: running tests doesn't modify code) --
 
     def run_test(self, command: str, timeout: float = 300.0) -> ToolResult:
@@ -283,6 +324,13 @@ class ToolBox:
         return self._run_shell(command, timeout)
 
     def _run_shell(self, command: str, timeout: float) -> ToolResult:
+        normalized = command.strip().lower()
+        if not any(normalized.startswith(prefix) for prefix in self.config.safe_command_prefixes):
+            return ToolResult(False, error="Command blocked by verification allow-list")
+        # Chaining/redirection is where a benign-looking test turns into a
+        # side-effecting shell script. Verification commands must be one tool.
+        if _has_unquoted_shell_operator(command):
+            return ToolResult(False, error="Shell composition is blocked for verification commands")
         try:
             proc = subprocess.run(
                 command, shell=True, cwd=self.root,

@@ -29,14 +29,14 @@ from .backend import BackendError, ModelBackend, OllamaBackend, Router, SimpleRo
 from .config import AgentConfig, TASK_PROFILES
 from .evaluator import BenchmarkFn, EvaluationEngineer, HealthChecker
 from .git_utils import GitWorkflow
-from .implementer import CodingImplementer
+from .structured_implementer import StructuredCodingImplementer
 from .learning import EngineeringLearningSystem
 from .models import (
     ApprovalStatus, EngineeringGoal, EngineeringProposal, EngineeringRun,
     RiskLevel, RunStatus, TaskProfileName,
 )
 from .planner import CodingPlanner
-from .recovery import FailureRecoveryEngineer
+from .structured_recovery import StructuredFailureRecoveryEngineer
 from .repository import RepositoryAnalyst
 from .reviewer import CodeReviewer
 from .storage import EngineeringStorage
@@ -112,6 +112,7 @@ class EngineeringOrchestrator:
         profile = TASK_PROFILES[goal.task_profile]
 
         run = EngineeringRun(goal=goal, task_profile=goal.task_profile, status=RunStatus.ANALYZING.value)
+        self._trace(run, "goal_classified", profile=goal.task_profile)
 
         backend = self._select_backend(goal.task_profile)
         run.backend = backend.name
@@ -120,6 +121,7 @@ class EngineeringOrchestrator:
         analyst = RepositoryAnalyst(read_tools, backend)
         repo_context = analyst.analyze(goal_description)
         run.repository_context = repo_context
+        self._trace(run, "repository_analyzed", candidates=len(repo_context.candidate_files), risks=len(repo_context.risks))
 
         lessons = self.learning.relevant_lessons(repo_context.affected_systems, goal.task_profile)
 
@@ -135,6 +137,7 @@ class EngineeringOrchestrator:
             raise
 
         run.plan = plan
+        self._trace(run, "plan_created", changes=len(plan.changes), risk=plan.risk_level)
         run.status = RunStatus.PLANNED.value
 
         proposal = self.reviewer.build_proposal(
@@ -185,6 +188,37 @@ class EngineeringOrchestrator:
         self._sync_run_approval(proposal)
         return proposal
 
+    def revise_plan(self, proposal_id: str, evidence: List[str]) -> EngineeringProposal:
+        """Replace a proposal's plan with a bounded, evidence-driven revision.
+
+        Revision never carries approval forward: new scope or risk requires a
+        fresh human decision, even if the original proposal was approved.
+        """
+        proposal = self.review(proposal_id)
+        if proposal.plan is None or proposal.goal is None:
+            raise ValueError("Proposal has no goal/plan to revise")
+        if proposal.plan.revision >= self.config.max_plan_revisions:
+            raise ValueError("Plan revision budget exhausted; human intervention is required")
+        run = self._find_run_for_proposal(proposal_id)
+        if run is None or run.repository_context is None:
+            raise ValueError("Proposal has no repository context to revise against")
+        backend = self._select_backend(run.task_profile)
+        lessons = self.learning.relevant_lessons(run.repository_context.affected_systems, run.task_profile)
+        revised = CodingPlanner(backend).revise(proposal.goal, run.repository_context, proposal.plan, evidence, lessons)
+        proposal.plan = revised
+        proposal.affected_files = list(revised.files)
+        proposal.risk = self.reviewer.review_plan(proposal.goal, revised)[1]
+        proposal.status = ApprovalStatus.WAITING_FOR_APPROVAL.value
+        proposal.decided_at = None
+        proposal.decision_notes = "Plan revised from execution evidence; fresh approval required."
+        run.plan = revised
+        run.approval = proposal.status
+        self._trace(run, "plan_revised", revision=revised.revision, evidence_count=len(evidence))
+        run.touch()
+        self.storage.save_proposal(proposal)
+        self.storage.save_run(run)
+        return proposal
+
     def _sync_run_approval(self, proposal: EngineeringProposal) -> None:
         for data in self.storage.all_runs():
             if data.get("proposal_id") == proposal.proposal_id:
@@ -219,14 +253,16 @@ class EngineeringOrchestrator:
 
         write_tools = ToolBox(self.config, permission=Permission.IMPLEMENT)
         backend = self._select_backend(run.task_profile)
-        implementer = CodingImplementer(backend, write_tools)
+        implementer = StructuredCodingImplementer(backend, write_tools)
 
         run.status = RunStatus.IMPLEMENTING.value
+        self._trace(run, "implementation_started", backend=backend.name)
         run.touch()
         self.storage.save_run(run)
 
         impl_result = implementer.implement(run.run_id, plan)
         run.implementation = impl_result
+        self._trace(run, "implementation_finished", success=impl_result.success, edits=len(impl_result.edits))
 
         if not impl_result.success:
             run.status = RunStatus.FAILED.value
@@ -246,12 +282,13 @@ class EngineeringOrchestrator:
         tester = TestEngineer(read_tools)
         test_results = tester.run_tests(plan.tests)
         run.tests = test_results
+        self._trace(run, "verification_finished", passed=sum(t.passed for t in test_results), total=len(test_results))
 
         # FAILURE RECOVERY IF NEEDED (bounded)
         if profile.requires_tests and not all(t.passed for t in test_results):
             run.status = RunStatus.RECOVERING.value
             self.storage.save_run(run)
-            recovery_engineer = FailureRecoveryEngineer(
+            recovery_engineer = StructuredFailureRecoveryEngineer(
                 backend, write_tools, tester, max_attempts=self.config.max_recovery_attempts
             )
             failing_test = next(t for t in test_results if not t.passed)
@@ -267,6 +304,17 @@ class EngineeringOrchestrator:
                         f"last test result: {failing_test.command} failed."
                     )
 
+        # INDEPENDENT REVIEW: evaluated from actual edits/tests, not the
+        # implementer's own success assertion.
+        actual_diff = read_tools.git_diff()
+        run.review = self.reviewer.review_implementation(
+            plan, impl_result.edits, run.tests, impl_result.patch_results,
+            actual_diff.data if actual_diff.ok else "",
+        )
+        if run.review.findings:
+            run.failures.extend(run.review.findings)
+        self._trace(run, "independent_review_finished", passed=run.review.passed, findings=len(run.review.findings))
+
         # EVALUATE
         run.status = RunStatus.EVALUATING.value
         health_after = self.evaluator.snapshot_health(plan.affected_systems)
@@ -276,7 +324,7 @@ class EngineeringOrchestrator:
         )
         run.evaluation = evaluation
 
-        overall_success = evaluation.code_works and not scope_violations
+        overall_success = evaluation.code_works and run.review.passed
         run.status = RunStatus.COMPLETE.value if overall_success else RunStatus.FAILED.value
         run.final_result = evaluation.summary
         run.touch()
@@ -289,6 +337,12 @@ class EngineeringOrchestrator:
         self.router.report_outcome(backend.name, run.task_profile, success=overall_success,
                                     evidence={"evaluation": evaluation.to_dict()})
         return run
+
+    @staticmethod
+    def _trace(run: EngineeringRun, event: str, **data) -> None:
+        """Append an auditable, secret-free execution event."""
+        import time
+        run.trace.append({"event": event, "at": time.time(), "data": data})
 
     def _find_run_for_proposal(self, proposal_id: str) -> Optional[EngineeringRun]:
         for data in self.storage.all_runs():
@@ -424,8 +478,9 @@ def _proposal_from_dict(data: Dict) -> EngineeringProposal:
 def _run_from_dict(data: Dict) -> EngineeringRun:
     from .models import (
         EngineeringGoal, EngineeringPlan, EvaluationResult, ImplementationResult,
-        PlannedChange, RecoveryAttempt, RepositoryContext, TestResult, FileEdit,
+        PlannedChange, RecoveryAttempt, RepositoryContext, TestResult, FileEdit, PatchResult,
         HealthSnapshot, BenchmarkResult,
+        ReviewResult,
     )
     d = dict(data)
 
@@ -445,7 +500,8 @@ def _run_from_dict(data: Dict) -> EngineeringRun:
     implementation = None
     if impl_data:
         edits = [FileEdit(**e) for e in impl_data.get("edits", [])]
-        implementation = ImplementationResult(**{**impl_data, "edits": edits})
+        patch_results = [PatchResult(**p) for p in impl_data.get("patch_results", [])]
+        implementation = ImplementationResult(**{**impl_data, "edits": edits, "patch_results": patch_results})
 
     tests_data = d.pop("tests", [])
     tests = [TestResult(**t) for t in tests_data]
@@ -470,8 +526,11 @@ def _run_from_dict(data: Dict) -> EngineeringRun:
             "health_before": health_before, "health_after": health_after,
         })
 
+    review_data = d.pop("review", None)
+    review = ReviewResult(**review_data) if review_data else None
+
     return EngineeringRun(
         **d, goal=goal, plan=plan, repository_context=repo_context,
         implementation=implementation, tests=tests,
-        recovery_attempts=recovery_attempts, evaluation=evaluation,
+        recovery_attempts=recovery_attempts, evaluation=evaluation, review=review,
     )

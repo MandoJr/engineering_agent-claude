@@ -8,8 +8,9 @@ failures within a bounded budget, evaluates whether it actually helped
 (not just whether it ran), and writes a lesson either way.
 
 ```
-GOAL -> ANALYZE -> PLAN -> PROPOSE -> USER APPROVAL -> IMPLEMENT
-     -> TEST -> [RECOVER if needed] -> EVALUATE -> LEARN
+GOAL -> CONTEXT / AST REPOSITORY MAP -> PLAN -> RISK REVIEW -> PROPOSE
+     -> USER APPROVAL -> STRUCTURED PATCH PREVIEW -> APPLY -> TEST / DIAGNOSE -> [RECOVER if needed]
+     -> EVALUATE -> INDEPENDENT DIFF REVIEW -> LEARN
 ```
 
 ## Install
@@ -78,7 +79,17 @@ standalone; you inject JARVIS's systems in from the outside.
   (`.git`, `.env`, `secrets/`, `node_modules/`, ...), or anything that
   looks like a credential file by name.
 - `DELETE` planned changes are never auto-applied -- they're surfaced
-  for manual handling.
+  by default. Set `AgentConfig(allow_file_deletion=True)` only when an
+  explicitly approved workflow is permitted to delete a single planned file.
+- Verification commands are restricted to known test/build prefixes and may
+  not contain unquoted shell composition. Model-generated test text therefore
+  cannot become arbitrary shell access.
+- Existing files are changed through validated structured patch operations,
+  not model-produced full-file rewrites. Every operation carries exact
+  expected context (or an AST-resolved Python symbol), is previewed as a
+  unified diff, syntax-checked for Python, scope-checked, and then applied.
+  A multi-file set is prevalidated before its first write; failed writes
+  attempt rollback and always report any remaining partial state.
 - Failure recovery (`recovery.py`) is bounded by
   `config.MAX_RECOVERY_ATTEMPTS` (default 3) -- there is no retry loop
   without a ceiling.
@@ -100,10 +111,11 @@ standalone; you inject JARVIS's systems in from the outside.
 | `backend.py` | `ModelBackend` abstraction, `OllamaBackend`, router adapters |
 | `tools.py` | Permission-gated file/git/shell tools (`READ_FILE`, `EDIT_FILE`, ...) |
 | `git_utils.py` | Safe git workflow; approval-gated commit/push |
-| `repository.py` | `RepositoryAnalyst` -- codebase understanding |
+| `repository.py` / `repository_graph.py` | AST-backed module, import, symbol, caller/callee and impact analysis |
 | `planner.py` | `CodingPlanner` -- goal + context -> structured plan |
-| `reviewer.py` | `CodeReviewer` -- risk analysis, scope validation, proposal building |
-| `implementer.py` | `CodingImplementer` -- applies an approved plan's changes |
+| `reviewer.py` | `CodeReviewer` -- risk analysis plus independent post-change diff/evidence review |
+| `structured_implementer.py` | `StructuredCodingImplementer` -- turns approved tasks into validated patch operations |
+| `patching.py` / `structured_implementer.py` | ChangeSet parsing, preview, validation, atomic application, and diff-first execution |
 | `tester.py` | `TestEngineer` -- runs a plan's tests |
 | `recovery.py` | `FailureRecoveryEngineer` -- bounded retry loop |
 | `evaluator.py` | `EvaluationEngineer` -- "code works" vs "improved JARVIS", health + benchmarks |

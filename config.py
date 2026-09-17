@@ -31,6 +31,16 @@ LESSONS_MIN_CONFIDENCE = 0.75
 MAX_RECOVERY_ATTEMPTS = 3
 MAX_FILES_PER_CHANGE = 25          # guardrail against runaway edits
 MAX_FILE_BYTES_FOR_CONTEXT = 200_000  # cap on how much of one file we read into a prompt
+MAX_COMMAND_OUTPUT_BYTES = 32_000
+MAX_TEST_COMMANDS = 12
+MAX_PLAN_REVISIONS = 2
+
+# Commands run by verification are deliberately allow-listed.  The agent must
+# not turn a model-produced test specification into arbitrary shell access.
+SAFE_COMMAND_PREFIXES = (
+    "python ", "python3 ", "py ", "pytest", "npm test", "npm run ",
+    "make test", "make check", "cargo test", "go test", "dotnet test",
+)
 
 # Paths the agent will never touch, even with approval, relative to project root.
 DEFAULT_FORBIDDEN_PATHS = [
@@ -180,6 +190,10 @@ class AgentConfig:
     forbidden_paths: List[str] = field(default_factory=lambda: list(DEFAULT_FORBIDDEN_PATHS))
     max_recovery_attempts: int = MAX_RECOVERY_ATTEMPTS
     max_files_per_change: int = MAX_FILES_PER_CHANGE
+    max_test_commands: int = MAX_TEST_COMMANDS
+    max_plan_revisions: int = MAX_PLAN_REVISIONS
+    safe_command_prefixes: tuple = SAFE_COMMAND_PREFIXES
+    allow_file_deletion: bool = False
 
     def __post_init__(self):
         self.project_root = Path(self.project_root).resolve()

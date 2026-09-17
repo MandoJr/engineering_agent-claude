@@ -58,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("proposal_id")
     p.add_argument("notes")
 
+    p = sub.add_parser("revise-plan")
+    p.add_argument("proposal_id")
+    p.add_argument("evidence", nargs="+", help="Observed failure/review evidence for the revised plan")
+
     p = sub.add_parser("implement")
     p.add_argument("proposal_id")
 
@@ -95,6 +99,8 @@ def main(argv=None) -> int:
             _print(agent.reject(args.proposal_id, notes=args.notes))
         elif args.command == "request-changes":
             _print(agent.request_changes(args.proposal_id, args.notes))
+        elif args.command == "revise-plan":
+            _print(agent.revise_plan(args.proposal_id, args.evidence))
         elif args.command == "implement":
             _print(agent.implement(args.proposal_id))
         elif args.command == "test":

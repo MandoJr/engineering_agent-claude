@@ -109,7 +109,12 @@ class CallableBackend(ModelBackend):
 
     def complete(self, prompt: str, system: Optional[str] = None,
                  json_mode: bool = False, timeout: float = 120.0) -> str:
-        return self._fn(prompt, system=system, json_mode=json_mode, timeout=timeout)
+        try:
+            return self._fn(prompt, system=system, json_mode=json_mode, timeout=timeout)
+        except BackendError:
+            raise
+        except Exception as exc:  # adapters must expose one stable failure type
+            raise BackendError(f"Backend '{self.name}' failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +217,12 @@ class SimpleRouter(Router):
             b for b in self._backends.values()
             if all(cap in b.capabilities for cap in required_capabilities)
         ]
-        return capable or list(self._backends.values())
+        if not capable:
+            raise BackendError(
+                f"No backend satisfies {required_capabilities}; available="
+                f"{ {name: backend.capabilities for name, backend in self._backends.items()} }"
+            )
+        return capable
 
     def select(self, task_profile_name: str,
                required_capabilities: List[str]) -> RoutingDecision:

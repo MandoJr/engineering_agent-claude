@@ -43,12 +43,21 @@ NEW_FILE_CONTENT = (
     '    return "backend_a"\n'
 )
 
+PATCH_JSON = json.dumps({
+    "changes": [{
+        "operation": "REPLACE_SYMBOL",
+        "target_symbol": "route",
+        "content": NEW_FILE_CONTENT,
+        "reason": "Add route for task y",
+    }]
+})
+
 
 def fake_complete(prompt, system=None, json_mode=False, timeout=120.0):
     if system and "Coding Planner" in system:
         return PLAN_JSON
     if system and "Coding Implementer" in system:
-        return NEW_FILE_CONTENT
+        return PATCH_JSON
     return "ok"
 
 
