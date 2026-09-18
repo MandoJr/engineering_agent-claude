@@ -1,4 +1,4 @@
-"""
+﻿"""
 Engineering Orchestrator.
 
 The single entry point JARVIS is meant to call:
@@ -44,6 +44,7 @@ from .tester import TestEngineer
 from .task_decomposer import TaskDecomposer
 from .task_execution import TaskExecutionEngine
 from .task_recovery import TaskRecoveryCoordinator
+from .task_verification import TaskVerificationEngine
 from .task_graph import TaskGraph, TaskStatus
 from .execution_state import TaskExecutionStateMachine
 from .tools import Permission, ToolBox
@@ -280,11 +281,29 @@ class EngineeringOrchestrator:
                 f"Proposal {proposal_id} has no plan to implement"
             )
 
-        # Baseline measurements happen before any task is changed.
-        baseline = self.evaluator.capture_baseline(plan.benchmarks)
-        health_before = self.evaluator.snapshot_health(
-            plan.affected_systems
-        )
+        # Capture baseline measurements exactly once. A resumed run must
+        # not redefine its baseline after some tasks have already changed
+        # the repository.
+        if run.baseline_benchmarks:
+            baseline = dict(run.baseline_benchmarks)
+        else:
+            baseline = self.evaluator.capture_baseline(plan.benchmarks)
+            run.baseline_benchmarks = dict(baseline)
+
+        if run.health_before:
+            from .models import HealthSnapshot
+            health_before = [
+                HealthSnapshot(**item)
+                for item in run.health_before
+            ]
+        else:
+            health_before = self.evaluator.snapshot_health(
+                plan.affected_systems
+            )
+            run.health_before = [
+                snapshot.to_dict()
+                for snapshot in health_before
+            ]
 
         write_tools = ToolBox(
             self.config,
@@ -562,6 +581,90 @@ class EngineeringOrchestrator:
                 return _run_from_dict(data)
         return None
 
+    def resume(self, run_id: str) -> EngineeringRun:
+        """
+        Safely resume an interrupted engineering run.
+
+        Resumption never bypasses approval. Completed tasks remain terminal
+        and are not re-executed. In-flight tasks are reconciled against the
+        repository before any new implementation is generated.
+        """
+        run = self._get_run(run_id)
+
+        if run.proposal_id is None:
+            raise ApprovalError(
+                f"Run {run_id} has no approval-bearing proposal and cannot be resumed."
+            )
+
+        proposal = self.review(run.proposal_id)
+
+        if proposal.status not in (
+            ApprovalStatus.APPROVED.value,
+            ApprovalStatus.NOT_REQUIRED.value,
+        ):
+            raise ApprovalError(
+                f"Refusing to resume run {run_id}: proposal status is "
+                f"'{proposal.status}', not APPROVED."
+            )
+
+        if run.plan is None:
+            raise ResumeError(
+                f"Run {run_id} has no engineering plan."
+            )
+
+        if not run.task_graph:
+            raise ResumeError(
+                f"Run {run_id} has no persisted task graph."
+            )
+
+        graph = TaskGraph.from_dict(run.task_graph)
+
+        if run.state_transitions:
+            state_machine = TaskExecutionStateMachine.from_dict(
+                graph,
+                {"transitions": run.state_transitions},
+            )
+        else:
+            state_machine = TaskExecutionStateMachine(graph)
+
+        read_tools = ToolBox(
+            self.config,
+            permission=Permission.READ_ONLY,
+        )
+        tester = TestEngineer(read_tools)
+        verifier = TaskVerificationEngine(tester)
+        from .task_resume import ResumeError, TaskResumeEngine
+
+        reconciliation = TaskResumeEngine(verifier).reconcile(
+            graph,
+            state_machine,
+        )
+
+        run.resume_count += 1
+        run.interruption_reason = None
+        run.task_graph = graph.to_dict()
+        run.state_transitions = [
+            transition.to_dict()
+            for transition in state_machine.transitions
+        ]
+        self._trace(
+            run,
+            "run_resume_reconciled",
+            reconciled_passed=reconciliation.reconciled_passed,
+            reconciled_failed=reconciliation.reconciled_failed,
+        )
+        run.touch()
+        self.storage.save_run(run)
+
+        # Reuse the normal implementation pipeline. It executes only READY
+        # tasks, so PASSED tasks are naturally skipped.
+        resumed = self.implement(run.proposal_id)
+
+        resumed.resume_count = run.resume_count
+        resumed.touch()
+        self.storage.save_run(resumed)
+        return resumed
+
     # -- direct test/evaluate re-entry (CLI: `test <run_id>`, `evaluate <run_id>`) --
 
     def test(self, run_id: str) -> EngineeringRun:
@@ -759,3 +862,4 @@ def _run_from_dict(data: Dict) -> EngineeringRun:
         implementation=implementation, tests=tests,
         recovery_attempts=recovery_attempts, evaluation=evaluation, review=review,
     )
+

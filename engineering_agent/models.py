@@ -362,6 +362,10 @@ class EngineeringRun(_Base):
     task_graph: Optional[Dict[str, Any]] = None
     state_transitions: List[Dict[str, Any]] = field(default_factory=list)
     current_task_id: Optional[str] = None
+    resume_count: int = 0
+    interruption_reason: Optional[str] = None
+    baseline_benchmarks: Dict[str, Any] = field(default_factory=dict)
+    health_before: List[Dict[str, Any]] = field(default_factory=list)
     status: str = RunStatus.CREATED.value
     final_result: Optional[str] = None
     lessons_created: List[str] = field(default_factory=list)   # lesson_ids

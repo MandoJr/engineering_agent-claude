@@ -92,12 +92,14 @@ class TaskExecutionStateMachine:
             TaskStatus.VERIFYING,
             TaskStatus.FAILED,
             TaskStatus.RECOVERING,
+            TaskStatus.INTERRUPTED,
             TaskStatus.CANCELLED,
         },
         TaskStatus.VERIFYING: {
             TaskStatus.PASSED,
             TaskStatus.FAILED,
             TaskStatus.RECOVERING,
+            TaskStatus.INTERRUPTED,
             TaskStatus.CANCELLED,
         },
         TaskStatus.FAILED: {
@@ -109,17 +111,28 @@ class TaskExecutionStateMachine:
             TaskStatus.RUNNING,
             TaskStatus.VERIFYING,
             TaskStatus.FAILED,
+            TaskStatus.INTERRUPTED,
             TaskStatus.CANCELLED,
         },
         TaskStatus.PASSED: set(),
         TaskStatus.SKIPPED: set(),
         TaskStatus.CANCELLED: set(),
+        TaskStatus.INTERRUPTED: {
+            TaskStatus.PASSED,
+            TaskStatus.FAILED,
+            TaskStatus.RECOVERING,
+            TaskStatus.CANCELLED,
+        },
     }
 
     TERMINAL_STATES = {
         TaskStatus.PASSED,
         TaskStatus.SKIPPED,
         TaskStatus.CANCELLED,
+    }
+
+    RESUMABLE_STATES = {
+        TaskStatus.INTERRUPTED,
     }
 
     def __init__(
