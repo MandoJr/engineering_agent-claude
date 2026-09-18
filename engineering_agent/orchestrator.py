@@ -43,6 +43,7 @@ from .storage import EngineeringStorage
 from .tester import TestEngineer
 from .task_decomposer import TaskDecomposer
 from .task_execution import TaskExecutionEngine
+from .task_recovery import TaskRecoveryCoordinator
 from .task_graph import TaskGraph, TaskStatus
 from .execution_state import TaskExecutionStateMachine
 from .tools import Permission, ToolBox
@@ -387,178 +388,65 @@ class EngineeringOrchestrator:
             blocked_tasks=outcome.blocked_tasks,
         )
 
-        # Bounded recovery remains available. Recovery is directed at the
-        # first failed task so independent tasks that already passed remain
-        # intact; dependent tasks stay blocked until that task succeeds.
+        # Per-task recovery coordinates bounded recovery across the whole DAG.
         if profile.requires_tests and outcome.failed_tasks:
-            failed_task_id = outcome.failed_tasks[0]
-            failed_task = graph.get(failed_task_id)
-            failed_task_tests = outcome.task_tests.get(
-                failed_task_id,
-                [],
+            recovery_coordinator = TaskRecoveryCoordinator(
+                backend=backend,
+                tools=write_tools,
+                tester=tester,
+                execution_engine=execution,
+                max_attempts=self.config.max_recovery_attempts,
+                checkpoint=checkpoint,
             )
 
-            if failed_task_tests:
-                failing_test = next(
-                    (
-                        result
-                        for result in failed_task_tests
-                        if not result.passed
-                    ),
-                    None,
+            recovery = recovery_coordinator.recover(
+                run_id=run.run_id,
+                plan=plan,
+                graph=graph,
+                state_machine=state_machine,
+                initial_outcome=outcome,
+            )
+
+            run.recovery_attempts.extend(recovery.attempts)
+
+            # Recovery patches are real implementation evidence and therefore
+            # become part of the final independent-review input.
+            recovery_edits = [
+                edit
+                for attempt in recovery.attempts
+                for edit in attempt.edits
+            ]
+            recovery_patch_results = [
+                patch
+                for attempt in recovery.attempts
+                for patch in attempt.patch_results
+            ]
+
+            if run.implementation is None:
+                run.implementation = outcome.implementation
+
+            run.implementation.edits.extend(recovery_edits)
+            run.implementation.patch_results.extend(
+                recovery_patch_results
+            )
+
+            run.tests = list(
+                dict.fromkeys(
+                    run.tests
+                    + recovery.tests
                 )
+            )
 
-                if failing_test is not None:
-                    failed_plan = outcome.task_plans[failed_task_id]
+            run.failures.extend(recovery.failures)
 
-                    run.status = RunStatus.RECOVERING.value
-                    state_machine.transition(
-                        failed_task_id,
-                        TaskStatus.RECOVERING,
-                        reason="Beginning bounded recovery for failed task.",
-                    )
-                    run.task_graph = graph.to_dict()
-                    run.state_transitions = [
-                        transition.to_dict()
-                        for transition in state_machine.transitions
-                    ]
-                    run.current_task_id = failed_task_id
-                    self._trace(
-                        run,
-                        "task_recovery_started",
-                        task_id=failed_task_id,
-                    )
-                    run.touch()
-                    self.storage.save_run(run)
-
-                    recovery_engineer = StructuredFailureRecoveryEngineer(
-                        backend,
-                        write_tools,
-                        tester,
-                        max_attempts=self.config.max_recovery_attempts,
-                    )
-
-                    failing_file = (
-                        failed_task.affected_files[0]
-                        if failed_task.affected_files
-                        else (
-                            failed_plan.files[0]
-                            if failed_plan.files
-                            else ""
-                        )
-                    )
-
-                    attempts = recovery_engineer.recover(
-                        failed_plan,
-                        failing_file,
-                        failing_test,
-                    )
-                    run.recovery_attempts.extend(attempts)
-
-                    if attempts and attempts[-1].succeeded:
-                        state_machine.transition(
-                            failed_task_id,
-                            TaskStatus.VERIFYING,
-                            reason="Recovery patch applied; re-verifying task.",
-                        )
-
-                        recovered_tests = tester.run_tests(
-                            failed_task.verification_commands
-                        )
-                        outcome.task_tests[failed_task_id] = recovered_tests
-                        run.tests = [
-                            result
-                            for task_results in outcome.task_tests.values()
-                            for result in task_results
-                        ]
-
-                        if recovered_tests and all(
-                            result.passed
-                            for result in recovered_tests
-                        ):
-                            state_machine.transition(
-                                failed_task_id,
-                                TaskStatus.PASSED,
-                                reason="Recovery verification passed.",
-                            )
-                            run.failures = [
-                                failure
-                                for failure in run.failures
-                                if not failure.startswith(
-                                    f"{failed_task_id}:"
-                                )
-                            ]
-
-                            # A successful recovery may unlock dependent
-                            # tasks. Resume the same DAG instead of ending
-                            # the engineering run prematurely.
-                            resumed = execution.resume(
-                                run.run_id,
-                                plan,
-                                graph,
-                                state_machine,
-                            )
-
-                            if resumed.implementation.edits:
-                                if run.implementation is None:
-                                    run.implementation = resumed.implementation
-                                else:
-                                    run.implementation.edits.extend(
-                                        resumed.implementation.edits
-                                    )
-                                    run.implementation.patch_results.extend(
-                                        resumed.implementation.patch_results
-                                    )
-                                    run.implementation.rollback_performed = (
-                                        run.implementation.rollback_performed
-                                        or resumed.implementation.rollback_performed
-                                    )
-                                    run.implementation.error = (
-                                        resumed.implementation.error
-                                        or run.implementation.error
-                                    )
-
-                            run.tests.extend(resumed.tests)
-                            run.failures.extend(resumed.failures)
-
-                            self._trace(
-                                run,
-                                "task_execution_resumed_after_recovery",
-                                recovered_task=failed_task_id,
-                                completed_tasks=resumed.completed_tasks,
-                                failed_tasks=resumed.failed_tasks,
-                                blocked_tasks=resumed.blocked_tasks,
-                            )
-                        else:
-                            state_machine.transition(
-                                failed_task_id,
-                                TaskStatus.FAILED,
-                                reason="Recovery verification still fails.",
-                            )
-                    else:
-                        state_machine.transition(
-                            failed_task_id,
-                            TaskStatus.FAILED,
-                            reason="Recovery attempts exhausted.",
-                        )
-
-                    run.task_graph = graph.to_dict()
-                    run.state_transitions = [
-                        transition.to_dict()
-                        for transition in state_machine.transitions
-                    ]
-                    run.current_task_id = None
-                    self._trace(
-                        run,
-                        "task_recovery_finished",
-                        task_id=failed_task_id,
-                        attempts=len(attempts),
-                        succeeded=bool(
-                            attempts and attempts[-1].succeeded
-                        ),
-                    )
-                    run.touch()
-                    self.storage.save_run(run)
+            self._trace(
+                run,
+                "task_recovery_coordinator_finished",
+                recovered_tasks=recovery.recovered_tasks,
+                failed_tasks=recovery.failed_tasks,
+                blocked_tasks=recovery.blocked_tasks,
+                attempts=len(recovery.attempts),
+            )
 
         # Remaining independent tasks may still have completed, while tasks
         # that depend on a failed task remain BLOCKED.
@@ -835,9 +723,22 @@ def _run_from_dict(data: Dict) -> EngineeringRun:
     for r in recovery_data:
         r = dict(r)
         edits = [FileEdit(**e) for e in r.get("edits", [])]
+        patch_results = [
+            PatchResult(**p)
+            for p in r.get("patch_results", [])
+        ]
         tr = r.get("test_result")
         test_result = TestResult(**tr) if tr else None
-        recovery_attempts.append(RecoveryAttempt(**{**r, "edits": edits, "test_result": test_result}))
+        recovery_attempts.append(
+            RecoveryAttempt(
+                **{
+                    **r,
+                    "edits": edits,
+                    "patch_results": patch_results,
+                    "test_result": test_result,
+                }
+            )
+        )
 
     eval_data = d.pop("evaluation", None)
     evaluation = None

@@ -52,7 +52,18 @@ class StructuredFailureRecoveryEngineer:
                 attempts.append(RecoveryAttempt(attempt_number=number, root_cause=root, recovery_plan="Patch rejected or failed: " + "; ".join(r.message for r in results), succeeded=False, evidence=[r.classification for r in results])); break
             retest = self.tester.run_tests([failed_test.command])[0]
             edits = [FileEdit(file=r.file, change_type=r.operation, diff=r.diff) for r in results if r.applied]
-            attempts.append(RecoveryAttempt(attempt_number=number, root_cause=root, recovery_plan="Applied validated recovery patch and re-ran failing test.", edits=edits, test_result=retest, succeeded=retest.passed, evidence=[retest.classification]))
+            attempts.append(
+                RecoveryAttempt(
+                    attempt_number=number,
+                    root_cause=root,
+                    recovery_plan="Applied validated recovery patch and re-ran failing test.",
+                    edits=edits,
+                    patch_results=results,
+                    test_result=retest,
+                    succeeded=retest.passed,
+                    evidence=[retest.classification],
+                )
+            )
             if retest.passed: break
             failed_test = retest
         return attempts

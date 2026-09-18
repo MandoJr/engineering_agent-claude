@@ -270,6 +270,7 @@ class RecoveryAttempt(_Base):
     root_cause: str = ""
     recovery_plan: str = ""
     edits: List[FileEdit] = field(default_factory=list)
+    patch_results: List[PatchResult] = field(default_factory=list)
     test_result: Optional[TestResult] = None
     succeeded: bool = False
     evidence: List[str] = field(default_factory=list)

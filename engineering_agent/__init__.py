@@ -45,6 +45,10 @@ from .task_decomposer import (
     TaskDecomposer,
     TaskDecompositionError,
 )
+from .task_recovery import (
+    TaskRecoveryCoordinator,
+    TaskRecoveryOutcome,
+)
 from .task_verification import (
     TaskVerificationEngine,
     TaskVerificationOutcome,
@@ -84,6 +88,8 @@ __all__ = [
 "TaskExecutionEngine",
 "TaskExecutionOutcome",
     "TaskVerificationEngine",
+    "TaskRecoveryCoordinator",
+    "TaskRecoveryOutcome",
     "TaskVerificationOutcome",
 "EngineeringTask",
     "TaskEvidence",
