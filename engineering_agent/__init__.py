@@ -45,6 +45,10 @@ from .task_decomposer import (
     TaskDecomposer,
     TaskDecompositionError,
 )
+from .task_review import (
+    IndependentTaskGraphReviewer,
+    TaskGraphReviewResult,
+)
 from .task_resume import (
     ResumeError,
     ResumeReconciliation,
@@ -95,6 +99,8 @@ __all__ = [
     "TaskVerificationEngine",
     "TaskRecoveryCoordinator",
     "TaskResumeEngine",
+    "IndependentTaskGraphReviewer",
+    "TaskGraphReviewResult",
     "ResumeReconciliation",
     "ResumeError",
     "TaskRecoveryOutcome",

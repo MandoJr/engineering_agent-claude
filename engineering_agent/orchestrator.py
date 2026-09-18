@@ -44,6 +44,7 @@ from .tester import TestEngineer
 from .task_decomposer import TaskDecomposer
 from .task_execution import TaskExecutionEngine
 from .task_recovery import TaskRecoveryCoordinator
+from .task_review import IndependentTaskGraphReviewer
 from .task_verification import TaskVerificationEngine
 from .task_graph import TaskGraph, TaskStatus
 from .execution_state import TaskExecutionStateMachine
@@ -479,6 +480,23 @@ class EngineeringOrchestrator:
             else [],
             actual_diff.data if actual_diff.ok else "",
         )
+
+        graph_review = IndependentTaskGraphReviewer().review(
+            graph=graph,
+            plan=plan,
+            edits=run.implementation.edits
+            if run.implementation
+            else [],
+            tests=run.tests,
+            patch_results=run.implementation.patch_results
+            if run.implementation
+            else [],
+            git_diff=actual_diff.data if actual_diff.ok else "",
+        )
+        run.task_review = graph_review.to_dict()
+
+        if not graph_review.passed:
+            run.failures.extend(graph_review.findings)
 
         if run.review.findings:
             run.failures.extend(run.review.findings)

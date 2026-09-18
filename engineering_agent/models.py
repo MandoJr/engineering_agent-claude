@@ -358,6 +358,7 @@ class EngineeringRun(_Base):
     recovery_attempts: List[RecoveryAttempt] = field(default_factory=list)
     evaluation: Optional[EvaluationResult] = None
     review: Optional[ReviewResult] = None
+    task_review: Optional[Dict[str, Any]] = None
     trace: List[Dict[str, Any]] = field(default_factory=list)
     task_graph: Optional[Dict[str, Any]] = None
     state_transitions: List[Dict[str, Any]] = field(default_factory=list)
