@@ -246,6 +246,76 @@ class TaskExecutionEngineTests(unittest.TestCase):
         )
 
 
+
+    def test_prerequisite_can_reference_a_later_change(self):
+        plan = EngineeringPlan(
+            plan_id="plan",
+            changes=[
+                PlannedChange(
+                    file="consumer.py",
+                    description="Use base layer",
+                    change_type="MODIFY",
+                    prerequisites=["base.py"],
+                ),
+                PlannedChange(
+                    file="base.py",
+                    description="Create base layer",
+                    change_type="CREATE",
+                ),
+            ],
+        )
+
+        graph = TaskDecomposer.from_plan(plan)
+
+        consumer = graph.get("plan:task-001")
+        base = graph.get("plan:task-002")
+
+        self.assertEqual(
+            consumer.dependencies,
+            [base.task_id],
+        )
+        self.assertEqual(base.status, TaskStatus.READY)
+        self.assertEqual(consumer.status, TaskStatus.BLOCKED)
+
+    def test_unresolved_prerequisite_is_rejected(self):
+        plan = EngineeringPlan(
+            plan_id="plan",
+            changes=[
+                PlannedChange(
+                    file="app.py",
+                    description="Change app",
+                    prerequisites=["missing.py"],
+                ),
+            ],
+        )
+
+        with self.assertRaises(Exception):
+            TaskDecomposer.from_plan(plan)
+
+    def test_ambiguous_file_prerequisite_is_rejected(self):
+        plan = EngineeringPlan(
+            plan_id="plan",
+            changes=[
+                PlannedChange(
+                    file="base.py",
+                    description="First base change",
+                ),
+                PlannedChange(
+                    file="base.py",
+                    description="Second base change",
+                ),
+                PlannedChange(
+                    file="consumer.py",
+                    description="Use base",
+                    prerequisites=["base.py"],
+                ),
+            ],
+        )
+
+        with self.assertRaises(Exception):
+            TaskDecomposer.from_plan(plan)
+
+
 if __name__ == "__main__":
     unittest.main()
 

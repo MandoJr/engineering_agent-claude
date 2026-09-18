@@ -450,12 +450,10 @@ class EngineeringOrchestrator:
                 recovery_patch_results
             )
 
-            run.tests = list(
-                dict.fromkeys(
-                    run.tests
-                    + recovery.tests
-                )
-            )
+            # Preserve every verification result. Repeated executions of
+            # the same command are distinct evidence, especially across
+            # recovery and resume.
+            run.tests.extend(recovery.tests)
 
             run.failures.extend(recovery.failures)
 

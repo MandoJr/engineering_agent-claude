@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 from .orchestrator import ApprovalError, EngineeringOrchestrator
+from .task_resume import ResumeError
 
 
 def _print(obj) -> None:
@@ -65,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("implement")
     p.add_argument("proposal_id")
 
+    p = sub.add_parser("resume")
+    p.add_argument("run_id", help="Persisted engineering run to resume")
+
     p = sub.add_parser("test")
     p.add_argument("run_id")
 
@@ -103,6 +107,8 @@ def main(argv=None) -> int:
             _print(agent.revise_plan(args.proposal_id, args.evidence))
         elif args.command == "implement":
             _print(agent.implement(args.proposal_id))
+        elif args.command == "resume":
+            _print(agent.resume(args.run_id))
         elif args.command == "test":
             _print(agent.test(args.run_id))
         elif args.command == "evaluate":
@@ -120,6 +126,9 @@ def main(argv=None) -> int:
     except ApprovalError as exc:
         print(f"APPROVAL ERROR: {exc}", file=sys.stderr)
         return 3
+    except ResumeError as exc:
+        print(f"RESUME ERROR: {exc}", file=sys.stderr)
+        return 1
     except (KeyError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

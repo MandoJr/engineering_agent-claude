@@ -73,22 +73,44 @@ class TaskDecomposer:
             change = plan.changes[index]
             dependencies = set()
 
-            for prior_index, prior_task in enumerate(tasks[:index]):
-                prior_change = plan.changes[prior_index]
-
-                # Two changes to the same file must be serialized.
+            # Changes to the same file are serialized in plan order so one
+            # patch cannot race another patch against the same file.
+            for prior_task in tasks[:index]:
                 if set(task.affected_files) & set(prior_task.affected_files):
                     dependencies.add(prior_task.task_id)
 
-                # Explicit prerequisites may reference a task id, file,
-                # target file, or change description.
-                for prerequisite in change.prerequisites:
+            # Explicit prerequisites are resolved against the ENTIRE task set,
+            # not just earlier tasks. Planner list order must never determine
+            # whether a declared dependency exists.
+            for prerequisite in change.prerequisites:
+                matches = []
+
+                for other_index, other_task in enumerate(tasks):
+                    if other_index == index:
+                        continue
+
+                    other_change = plan.changes[other_index]
+
                     if TaskDecomposer._matches_prerequisite(
                         prerequisite,
-                        prior_task,
-                        prior_change,
+                        other_task,
+                        other_change,
                     ):
-                        dependencies.add(prior_task.task_id)
+                        matches.append(other_task.task_id)
+
+                if not matches:
+                    raise TaskDecompositionError(
+                        f"Task '{task.task_id}' declares unresolved "
+                        f"prerequisite '{prerequisite}'"
+                    )
+
+                if len(matches) > 1:
+                    raise TaskDecompositionError(
+                        f"Task '{task.task_id}' declares ambiguous "
+                        f"prerequisite '{prerequisite}'; matches {matches}"
+                    )
+
+                dependencies.add(matches[0])
 
             task.dependencies = sorted(dependencies)
 
