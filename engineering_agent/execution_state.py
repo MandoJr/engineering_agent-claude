@@ -29,6 +29,10 @@ class InvalidTaskTransitionError(ExecutionStateError):
         )
 
 
+class StateIntegrityError(ExecutionStateError):
+    """Raised when persisted execution history disagrees with task state."""
+
+
 @dataclass
 class StateTransition:
     task_id: str
@@ -247,15 +251,18 @@ class TaskExecutionStateMachine:
 
     def validate(self) -> None:
         """
-        Validate graph consistency and recorded transition history.
+        Validate graph consistency and persisted transition history.
 
-        This does not reconstruct history by replaying it; it confirms that
-        every recorded transition itself was legal according to the state
-        machine.
+        Every transition must be legal, every task's transition chain must be
+        continuous, and the final recorded state must match the task graph.
         """
         self.graph.validate()
 
+        last_status_by_task: Dict[str, TaskStatus] = {}
+
         for transition in self._transitions:
+            task = self.graph.get(transition.task_id)
+
             allowed = self.ALLOWED_TRANSITIONS[transition.previous_status]
             if transition.new_status not in allowed:
                 raise InvalidTaskTransitionError(
@@ -264,8 +271,53 @@ class TaskExecutionStateMachine:
                     transition.new_status,
                 )
 
-            # Every transition must reference a real task.
-            self.graph.get(transition.task_id)
+            previous_recorded = last_status_by_task.get(
+                transition.task_id
+            )
+
+            if (
+                previous_recorded is not None
+                and transition.previous_status != previous_recorded
+            ):
+                raise StateIntegrityError(
+                    f"Transition history for task "
+                    f"{transition.task_id} is discontinuous: "
+                    f"expected previous state "
+                    f"{previous_recorded.value}, got "
+                    f"{transition.previous_status.value}."
+                )
+
+            last_status_by_task[transition.task_id] = (
+                transition.new_status
+            )
+
+        for task in self.graph.tasks.values():
+            last_recorded_status = last_status_by_task.get(
+                task.task_id
+            )
+
+            # PENDING/BLOCKED/READY are dependency-derived states and may
+            # legitimately exist without an explicit transition record.
+            if last_recorded_status is None:
+                if task.status not in {
+                    TaskStatus.PENDING,
+                    TaskStatus.BLOCKED,
+                    TaskStatus.READY,
+                }:
+                    raise StateIntegrityError(
+                        f"Persisted task {task.task_id} is in "
+                        f"{task.status.value} without any recorded "
+                        "execution transition."
+                    )
+                continue
+
+            if task.status != last_recorded_status:
+                raise StateIntegrityError(
+                    f"Persisted state mismatch for task {task.task_id}: "
+                    f"transition history ends at "
+                    f"{last_recorded_status.value}, but graph records "
+                    f"{task.status.value}."
+                )
 
     def to_dict(self) -> Dict[str, Any]:
         self.validate()

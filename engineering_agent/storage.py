@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+class StorageError(RuntimeError):
+    """Raised when a persisted engineering record cannot be safely loaded."""
+
+
 class JsonStore:
     """A tiny append/update JSON-lines-ish store, one JSON file per record,
     grouped into a directory per record type. Safe for single-process use."""
@@ -40,7 +44,20 @@ class JsonStore:
         p = self._path(record_id)
         if not p.exists():
             return None
-        return json.loads(p.read_text(encoding="utf-8"))
+
+        try:
+            return json.loads(
+                p.read_text(encoding="utf-8")
+            )
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise StorageError(
+                f"Persisted {self.dir.name} record "
+                f"{record_id!r} could not be loaded safely: {exc}"
+            ) from exc
 
     def delete(self, record_id: str) -> None:
         p = self._path(record_id)

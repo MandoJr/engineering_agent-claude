@@ -39,15 +39,24 @@ from .planner import CodingPlanner
 from .structured_recovery import StructuredFailureRecoveryEngineer
 from .repository import RepositoryAnalyst
 from .reviewer import CodeReviewer
-from .storage import EngineeringStorage
 from .tester import TestEngineer
 from .task_decomposer import TaskDecomposer
 from .task_execution import TaskExecutionEngine
 from .task_recovery import TaskRecoveryCoordinator
 from .task_review import IndependentTaskGraphReviewer
 from .task_verification import TaskVerificationEngine
-from .task_graph import TaskGraph, TaskStatus
-from .execution_state import TaskExecutionStateMachine
+from .task_graph import (
+    TaskGraph,
+    TaskStatus,
+    UnknownTaskError,
+)
+from .execution_state import (
+    ExecutionStateError,
+    StateIntegrityError,
+    TaskExecutionStateMachine,
+)
+from .task_resume import ResumeError, TaskResumeEngine
+from .storage import EngineeringStorage, StorageError
 from .tools import Permission, ToolBox
 
 
@@ -605,14 +614,36 @@ class EngineeringOrchestrator:
         and are not re-executed. In-flight tasks are reconciled against the
         repository before any new implementation is generated.
         """
-        run = self._get_run(run_id)
+        try:
+            run = self._get_run(run_id)
+        except (
+            StorageError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ) as exc:
+            raise ResumeError(
+                f"Run {run_id} could not be loaded safely from "
+                f"persistent storage: {exc}"
+            ) from exc
 
         if run.proposal_id is None:
             raise ApprovalError(
                 f"Run {run_id} has no approval-bearing proposal and cannot be resumed."
             )
 
-        proposal = self.review(run.proposal_id)
+        try:
+            proposal = self.review(run.proposal_id)
+        except (
+            StorageError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ) as exc:
+            raise ResumeError(
+                f"Run {run_id} references a proposal that could not "
+                f"be loaded safely: {exc}"
+            ) from exc
 
         if proposal.status not in (
             ApprovalStatus.APPROVED.value,
@@ -633,15 +664,32 @@ class EngineeringOrchestrator:
                 f"Run {run_id} has no persisted task graph."
             )
 
-        graph = TaskGraph.from_dict(run.task_graph)
+        try:
+            graph = TaskGraph.from_dict(run.task_graph)
 
-        if run.state_transitions:
-            state_machine = TaskExecutionStateMachine.from_dict(
-                graph,
-                {"transitions": run.state_transitions},
-            )
-        else:
-            state_machine = TaskExecutionStateMachine(graph)
+            if run.state_transitions:
+                state_machine = TaskExecutionStateMachine.from_dict(
+                    graph,
+                    {"transitions": run.state_transitions},
+                )
+            else:
+                state_machine = TaskExecutionStateMachine(graph)
+
+            graph.validate()
+            state_machine.validate()
+
+        except (
+            StateIntegrityError,
+            ExecutionStateError,
+            UnknownTaskError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ) as exc:
+            raise ResumeError(
+                f"Run {run_id} contains inconsistent persisted "
+                f"execution state and cannot be resumed safely: {exc}"
+            ) from exc
 
         read_tools = ToolBox(
             self.config,
@@ -649,7 +697,6 @@ class EngineeringOrchestrator:
         )
         tester = TestEngineer(read_tools)
         verifier = TaskVerificationEngine(tester)
-        from .task_resume import ResumeError, TaskResumeEngine
 
         reconciliation = TaskResumeEngine(verifier).reconcile(
             graph,

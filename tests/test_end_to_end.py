@@ -1,4 +1,6 @@
-﻿import json
+from engineering_agent.task_graph import TaskGraph
+from engineering_agent.execution_state import TaskExecutionStateMachine
+import json
 import shutil
 import subprocess
 import tempfile
@@ -7,7 +9,7 @@ from pathlib import Path
 
 from engineering_agent.backend import CallableBackend, SimpleRouter
 from engineering_agent.models import RunStatus
-from engineering_agent.orchestrator import ApprovalError, EngineeringOrchestrator
+from engineering_agent.orchestrator import ApprovalError, EngineeringOrchestrator, ResumeError
 from engineering_agent.task_graph import TaskStatus
 
 
@@ -216,9 +218,30 @@ class PublicEngineeringLifecycleTests(unittest.TestCase):
             if task["metadata"]["source_file"] == "base.py"
         )
 
-        persisted.task_graph["tasks"][base_task_id]["status"] = (
-            TaskStatus.INTERRUPTED.value
+        graph = TaskGraph.from_dict(
+            persisted.task_graph
         )
+        state_machine = TaskExecutionStateMachine.from_dict(
+            graph,
+            {"transitions": persisted.state_transitions},
+        )
+
+        state_machine.transition(
+            base_task_id,
+            TaskStatus.RUNNING,
+            reason="Simulated task execution before process interruption.",
+        )
+        state_machine.transition(
+            base_task_id,
+            TaskStatus.INTERRUPTED,
+            reason="Simulated process interruption during active task.",
+        )
+
+        persisted.task_graph = graph.to_dict()
+        persisted.state_transitions = [
+            transition.to_dict()
+            for transition in state_machine.transitions
+        ]
         persisted.current_task_id = base_task_id
 
         # The implementation actually reached disk before the simulated
@@ -256,6 +279,57 @@ class PublicEngineeringLifecycleTests(unittest.TestCase):
             "consumer.py",
             self.implementation_calls[0],
         )
+
+    def test_public_resume_rejects_corrupt_persisted_run(self):
+        proposal = self.agent.propose(
+            "Create base and consumer modules",
+            task_profile="IMPLEMENT",
+        )
+        self.agent.approve(proposal.proposal_id)
+
+        run = self.agent._find_run_for_proposal(
+            proposal.proposal_id
+        )
+        self.assertIsNotNone(run)
+
+        run_path = self.agent.storage.runs._path(run.run_id)
+        run_path.write_text(
+            '{"corrupted": ',
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ResumeError):
+            self.agent.resume(run.run_id)
+
+    def test_public_resume_rejects_inconsistent_transition_history(self):
+        proposal = self.agent.propose(
+            "Create base and consumer modules",
+            task_profile="IMPLEMENT",
+        )
+        self.agent.approve(proposal.proposal_id)
+
+        run = self.agent._find_run_for_proposal(
+            proposal.proposal_id
+        )
+        self.assertIsNotNone(run)
+
+        persisted = self.agent._get_run(run.run_id)
+
+        transitions = [
+            {
+                "task_id": "not-a-real-task",
+                "previous_status": "READY",
+                "new_status": "RUNNING",
+                "reason": "tampered",
+                "evidence": {},
+            }
+        ]
+
+        persisted.state_transitions = transitions
+        self.agent.storage.save_run(persisted)
+
+        with self.assertRaises(ResumeError):
+            self.agent.resume(run.run_id)
 
     def test_public_resume_still_requires_approval(self):
         proposal = self.agent.propose(
